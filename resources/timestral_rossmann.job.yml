@@ -1,0 +1,100 @@
+resources:
+  jobs:
+    timestral_rossmann:
+      name: timestral_rossmann
+      description: >
+        Load Rossmann sales into Unity Catalog, register Timestral as a UC model (@champion), forecast every store
+        with Timestral (zero-shot, serverless GPU) and Prophet (fitted per store), save the forecasts next to the data
+        and compare them in MLflow. Fully serverless.
+
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: schema
+          default: ${resources.schemas.timestral.name}
+        - name: model_id
+          default: ${var.model_id}
+        - name: experiment_name
+          default: ${var.experiment_name}
+        - name: horizon
+          default: "48"
+        - name: n_cuts
+          default: "3"
+        - name: cut_step_days
+          default: "28"
+        - name: short_history_days
+          default: "90"
+        - name: max_stores
+          default: "0"  # 0 = all stores; set e.g. 50 for a quick run
+
+      environments:
+        - environment_key: serverless_cpu
+          spec:
+            environment_version: "6"  # MLflow 3 (version 4 ships MLflow 2)
+        # Serverless GPU (AI Runtime) with PyTorch preinstalled. Needs the workspace preview
+        # "Serverless workspace base environment support in Jobs".
+        - environment_key: serverless_gpu
+          spec:
+            base_environment: workspace-base-environments/databricks_ai_v6
+
+      tasks:
+        - task_key: setup_data
+          environment_key: serverless_cpu
+          timeout_seconds: 1800
+          max_retries: 1
+          notebook_task:
+            notebook_path: ../src/notebooks/00_setup_data.py
+
+        # Beginner path: Timestral straight from the volume, on CPU
+        - task_key: quickstart
+          depends_on: [{task_key: setup_data}]
+          environment_key: serverless_cpu  # one store: no GPU needed
+          timeout_seconds: 1800
+          max_retries: 1
+          notebook_task:
+            notebook_path: ../src/notebooks/01_quickstart.py
+
+        - task_key: covariates_explained
+          depends_on: [{task_key: quickstart}]
+          environment_key: serverless_cpu  # one store: no GPU needed
+          timeout_seconds: 1800
+          max_retries: 1
+          notebook_task:
+            notebook_path: ../src/notebooks/02_covariates_explained.py
+
+        # Production path: Unity Catalog model @champion
+        - task_key: register_model
+          depends_on: [{task_key: quickstart}]
+          environment_key: serverless_cpu
+          timeout_seconds: 1800
+          max_retries: 1
+          notebook_task:
+            notebook_path: ../src/notebooks/03_register_model.py
+
+        - task_key: forecast_all_stores
+          depends_on: [{task_key: register_model}]
+          environment_key: serverless_gpu
+          compute:
+            hardware_accelerator: GPU_1xA10
+          # The notebooks are idempotent, so a timeout + retries is safe.
+          timeout_seconds: 900
+          max_retries: 2
+          min_retry_interval_millis: 30000
+          notebook_task:
+            notebook_path: ../src/notebooks/04_forecast_all_stores.py
+
+        - task_key: prophet_baseline
+          depends_on: [{task_key: setup_data}]
+          environment_key: serverless_cpu
+          timeout_seconds: 1800
+          max_retries: 1
+          notebook_task:
+            notebook_path: ../src/notebooks/05_prophet_baseline.py
+
+        - task_key: evaluate
+          depends_on: [{task_key: forecast_all_stores}, {task_key: prophet_baseline}]
+          environment_key: serverless_cpu
+          timeout_seconds: 1800
+          max_retries: 1
+          notebook_task:
+            notebook_path: ../src/notebooks/06_evaluate.py

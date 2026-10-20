@@ -1,0 +1,25 @@
+bundle:
+  name: timestral-databricks
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Unity Catalog catalog for the schema, tables, volumes and model (you need USE CATALOG + CREATE SCHEMA).
+  schema:
+    description: Schema created by the bundle.
+    default: timestral_forecast
+  model_id:
+    description: Timestral checkpoint on the Hugging Face Hub.
+    default: mistralai/Timestral-209M
+  experiment_name:
+    description: MLflow experiment used to compare the models.
+    default: /Users/${workspace.current_user.userName}/timestral_rossmann
+
+# Deploy with your CLI profile and catalog:
+#   databricks bundle deploy -p <profile> --var catalog=<catalog>
+targets:
+  dev:
+    default: true
+    mode: development

@@ -1,0 +1,83 @@
+resources:
+  jobs:
+    timestral_compute_benchmark:
+      name: timestral_compute_benchmark
+      description: >
+        Optional. The same Timestral @champion forecasts on classic compute (GPU node, CPU node, CPU cluster with
+        Spark applyInPandas), to compare runtimes with the serverless GPU of the main job. Run timestral_rossmann first.
+        Node types are AWS; change them for Azure or GCP.
+
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: schema
+          default: ${resources.schemas.timestral.name}
+        - name: model_id
+          default: ${var.model_id}
+        - name: experiment_name
+          default: ${var.experiment_name}
+        - name: max_stores
+          default: "0"
+
+      job_clusters:
+        - job_cluster_key: gpu  # 1x NVIDIA A10G 24 GB, 8 vCPU
+          new_cluster:
+            spark_version: 18.x-gpu-ml-scala2.13  # 18 LTS ML (GPU)
+            node_type_id: g5.2xlarge
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.master: local[*, 4]
+              spark.databricks.cluster.profile: singleNode
+            custom_tags:
+              ResourceClass: SingleNode
+
+        - job_cluster_key: cpu_single  # 32 vCPU, 128 GB
+          new_cluster:
+            spark_version: 18.x-cpu-ml-scala2.13  # 18 LTS ML
+            node_type_id: m6id.8xlarge
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.master: local[*, 4]
+              spark.databricks.cluster.profile: singleNode
+            custom_tags:
+              ResourceClass: SingleNode
+
+        - job_cluster_key: cpu_cluster  # 4 workers x 32 vCPU = 128 vCPU
+          new_cluster:
+            spark_version: 18.x-cpu-ml-scala2.13  # 18 LTS ML
+            node_type_id: m6id.8xlarge
+            num_workers: 4
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.task.cpus: "4"  # 8 tasks per worker, 4 PyTorch threads each
+            spark_env_vars:
+              TIMESTRAL_TORCH_THREADS: "4"
+
+      environments:
+        - environment_key: serverless_cpu
+          spec:
+            environment_version: "6"
+
+      tasks:
+        - task_key: timestral_classic_gpu
+          job_cluster_key: gpu
+          notebook_task:
+            notebook_path: ../src/notebooks/04_forecast_all_stores.py
+
+        - task_key: timestral_classic_cpu
+          job_cluster_key: cpu_single
+          notebook_task:
+            notebook_path: ../src/notebooks/04_forecast_all_stores.py
+
+        - task_key: timestral_cpu_cluster
+          job_cluster_key: cpu_cluster
+          notebook_task:
+            notebook_path: ../src/notebooks/04b_forecast_cpu_cluster.py
+
+        - task_key: evaluate
+          depends_on: [{task_key: timestral_classic_gpu}, {task_key: timestral_classic_cpu}, {task_key: timestral_cpu_cluster}]
+          environment_key: serverless_cpu
+          notebook_task:
+            notebook_path: ../src/notebooks/06_evaluate.py

@@ -1,0 +1,8 @@
+resources:
+  volumes:
+    models:
+      catalog_name: ${var.catalog}
+      schema_name: ${resources.schemas.timestral.name}
+      name: models
+      volume_type: MANAGED
+      comment: Timestral checkpoints downloaded from the Hugging Face Hub (config.json + model.safetensors).

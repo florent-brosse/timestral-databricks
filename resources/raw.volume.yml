@@ -1,0 +1,8 @@
+resources:
+  volumes:
+    raw:
+      catalog_name: ${var.catalog}
+      schema_name: ${resources.schemas.timestral.name}
+      name: raw
+      volume_type: MANAGED
+      comment: Raw Rossmann CSV files (train, test, store).

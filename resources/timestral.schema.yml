@@ -1,0 +1,6 @@
+resources:
+  schemas:
+    timestral:
+      catalog_name: ${var.catalog}
+      name: ${var.schema}
+      comment: Timestral vs Prophet sales forecasting demo on the Rossmann dataset.
