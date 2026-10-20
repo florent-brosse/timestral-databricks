@@ -28,14 +28,10 @@
 # COMMAND ----------
 
 # MMF at a pinned commit, with the dependencies of the model family (local, global or foundation)
-MMF_COMMIT = "322ef91b7002067f9f7c7c37e5ca3e9e8abb28b4"
+import common
 
-dbutils.widgets.text("mmf_models", "Chronos2,TimesFM_2_5_200m,ChronosBoltBase")
-families = {"local" if m.startswith(("StatsForecast", "SKTime")) else
-            "global" if m.startswith(("MLForecast", "NeuralForecast")) else "foundation"
-            for m in dbutils.widgets.get("mmf_models").split(",") if m.strip()}
-assert len(families) == 1, f"run one model family at a time (each has its own dependencies): {families}"
-MMF_PIP = f"mmf_sa[{families.pop()}] @ git+https://github.com/databricks-industry-solutions/many-model-forecasting.git@{MMF_COMMIT}"
+MMF_PIP = (f"mmf_sa[{common.mmf_family(common.mmf_models(dbutils))}] @ "
+           f"git+https://github.com/databricks-industry-solutions/many-model-forecasting.git@{common.MMF_COMMIT}")
 
 # COMMAND ----------
 
@@ -47,8 +43,6 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-import importlib.metadata
-import json
 import time
 import uuid
 
@@ -60,12 +54,13 @@ from pyspark.sql import functions as F
 import common
 
 cfg = common.with_calendar(spark, common.get_config(dbutils, spark))
-MODELS = [m.strip() for m in dbutils.widgets.get("mmf_models").split(",") if m.strip()]
-FAMILY = ("local" if MODELS[0].startswith(("StatsForecast", "SKTime")) else
-          "global" if MODELS[0].startswith(("MLForecast", "NeuralForecast")) else "foundation")
-mmf_commit = json.loads(importlib.metadata.distribution("mmf_sa").read_text("direct_url.json"))["vcs_info"]["commit_id"]
-# MMF's own backtest output (appended by run_forecast), one table per family: the job runs the families in parallel
-EVALUATION = cfg.table(f"mmf_evaluation_{FAMILY}")
+MODELS = common.mmf_models(dbutils)
+FAMILY = common.mmf_family(MODELS)
+# MMF's own backtest output (appended by run_forecast), one table per family: the job runs the families in parallel.
+# Rows of earlier runs of these models are deleted, so the table does not grow with every run.
+EVALUATION = f"{cfg.catalog}.{cfg.schema}.mmf_evaluation_{FAMILY}"
+if spark.catalog.tableExists(EVALUATION):
+    spark.sql(f"DELETE FROM {EVALUATION} WHERE model IN ({', '.join(repr(m) for m in MODELS)})")
 
 
 def takes_covariates(model: str) -> bool:
@@ -74,11 +69,6 @@ def takes_covariates(model: str) -> bool:
                       "Chronos2", "Chronos2Small", "Chronos2Synth", "TimesFM_2_5_200m"}
             or (model.startswith("NeuralForecast") and model != "NeuralForecastAutoPatchTST"))
 
-
-if FAMILY == "local":
-    # MMF's settings for local models: Arrow on, and no adaptive execution, so every store gets its own task
-    spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
-    spark.conf.set("spark.sql.adaptive.enabled", "false")
 
 # COMMAND ----------
 
@@ -101,7 +91,12 @@ mmf_input = (stores.crossJoin(calendar).join(history, ["store", "date"], "left")
                      *[F.coalesce(c, F.lit(0.0)).alias(c) for c in common.COV_KEYS])
              .cache())
 n_stores = stores.count()
-spark.conf.set("spark.sql.shuffle.partitions", str(n_stores))
+if FAMILY == "local":
+    # MMF's settings for local models: Arrow on, no adaptive execution and enough partitions for one store per task
+    spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
+    spark.conf.set("spark.sql.adaptive.enabled", "false")
+    if int(spark.conf.get("spark.sql.shuffle.partitions")) < n_stores:
+        spark.conf.set("spark.sql.shuffle.partitions", str(n_stores))
 
 # MMF's backtest windows start at end - backtest_length + 1, then every `stride` days: the cut dates of notebooks 04-05
 first_cut = min(cfg.cut_dates())
@@ -113,10 +108,12 @@ print(f"{n_stores} stores, backtest_length={backtest_length}, stride={cfg.cut_st
 # MAGIC %md
 # MAGIC ## Run MMF, then save the forecasts next to Timestral and Prophet
 # MAGIC `run_forecast` tracks each model in its own MLflow experiment (`<experiment>_mmf`), registers the global and
-# MAGIC foundation models in Unity Catalog (`<catalog>.<schema>.<model>_rossmann`) and appends its backtest to
+# MAGIC foundation models in Unity Catalog (`<catalog>.<schema>.<model>_rossmann_<scenario>`) and appends its backtest to
 # MAGIC `mmf_evaluation_<family>` (one row per store and window, forecast and actuals as arrays). Each window becomes
 # MAGIC 48 rows of the `forecasts` table, under the model name `mmf_<model>`, with an MLflow run in the main experiment
-# MAGIC like Timestral and Prophet.
+# MAGIC like Timestral and Prophet. MMF logs the errors of a model or a store and carries on, so every scenario is checked
+# MAGIC first (every store, cut date and day exactly once): an incomplete model keeps its previous forecasts and the task
+# MAGIC fails at the end.
 
 # COMMAND ----------
 
@@ -144,7 +141,7 @@ def run_mmf(model: str, scenario: str) -> tuple:
         serverless=FAMILY == "foundation",  # driver-side prediction on one GPU, like Timestral in notebook 04
         data_quality_check=False,
         experiment_path=f"{cfg.experiment_name}_mmf",
-        use_case_name="rossmann",
+        use_case_name=f"rossmann_{scenario}",  # registered as <model>_rossmann_<scenario>
         run_id=run_id,
     )
     runtime = time.perf_counter() - t0
@@ -161,14 +158,31 @@ def run_mmf(model: str, scenario: str) -> tuple:
     return forecasts, runtime
 
 
-mlflow.set_experiment(cfg.experiment_name)
+expected = n_stores * cfg.n_cuts * cfg.horizon
+incomplete = []
 for model in MODELS:
     label = f"mmf_{model}"
     scenarios = ["full_cov", "full_nocov"] if takes_covariates(model) else ["full_nocov"]
     results = {s: run_mmf(model, s) for s in scenarios}
 
+    # MMF logs a failed model or store and carries on: check every scenario before replacing the saved forecasts
+    complete = True
+    for scenario, (forecasts, runtime) in results.items():
+        c = forecasts.agg(F.count("*").alias("rows"), F.countDistinct("store").alias("stores"),
+                          F.countDistinct("store", "cut_date", "date").alias("keys"),
+                          F.sort_array(F.collect_set("cut_date")).alias("cuts")).first()
+        cuts = [pd.Timestamp(d) for d in c.cuts]
+        print(f"{label} · {scenario}: {c.rows:,}/{expected:,} rows, {c.stores}/{n_stores} stores, "
+              f"cuts {[str(d.date()) for d in cuts]}, {runtime:.0f}s")
+        if not (c.rows == c.keys == expected and cuts == cfg.cut_dates()):
+            complete = False
+    if not complete:
+        incomplete.append(label)
+        print(f"  {label}: incomplete MMF output (its errors are in the log above), previous forecasts kept")
+        continue
+
     mlflow.set_experiment(cfg.experiment_name)  # run_forecast switched to the MMF experiment
-    params = {"model": label, "model_version": f"mmf_sa@{mmf_commit[:7]} {model}", "horizon": cfg.horizon,
+    params = {"model": label, "model_version": f"mmf_sa@{common.MMF_COMMIT[:7]} {model}", "horizon": cfg.horizon,
               "n_stores": n_stores, "cut_dates": ",".join(str(c.date()) for c in cfg.cut_dates()),
               "execution": "MMF run_forecast", "backtest_length": backtest_length, "stride": cfg.cut_step_days}
     with mlflow.start_run(run_name=label) as parent:
@@ -184,23 +198,11 @@ for model in MODELS:
             parts.append(forecasts.withColumn("mlflow_run_id", F.lit(child.info.run_id)))
 
         out = parts[0]
-        for p in parts[1:]:
-            out = out.unionByName(p)
+        for part in parts[1:]:
+            out = out.unionByName(part)
         out = (out.withColumn("model", F.lit(label)).withColumn("model_version", F.lit(params["model_version"]))
                .withColumn("created_at", F.current_timestamp()).select(*common.FORECAST_COLUMNS))
         out.write.mode("overwrite").option("replaceWhere", f"model = '{label}'").saveAsTable(cfg.table("forecasts"))
-        # MMF skips a store whose fit fails (the error is in the executor logs): count what came back
-        counts = {r.scenario: r for r in spark.table(cfg.table("forecasts")).where(f"model = '{label}'")
-                  .groupBy("scenario").agg(F.count("*").alias("rows"), F.countDistinct("store").alias("stores"),
-                                           F.sort_array(F.collect_set("cut_date")).alias("cuts")).collect()}
-        mlflow.log_metrics({"runtime_s": sum(r for _, r in results.values()),
-                            "forecast_rows": sum(r.rows for r in counts.values())})
-    expected = n_stores * cfg.n_cuts * cfg.horizon
-    for scenario, (_, runtime) in results.items():
-        r = counts.get(scenario)
-        rows, n = (r.rows, r.stores) if r else (0, 0)
-        print(f"{label} · {scenario}: {rows:,}/{expected:,} rows, {n}/{n_stores} stores, {runtime:.0f}s")
-        if r:
-            assert [pd.Timestamp(c) for c in r.cuts] == cfg.cut_dates(), "MMF windows differ from the cut dates"
-        if rows < expected:
-            print(f"  WARNING: MMF returned no forecast for {n_stores - n} stores")
+        mlflow.log_metrics({"runtime_s": sum(r for _, r in results.values()), "forecast_rows": expected * len(results)})
+
+assert not incomplete, f"MMF returned incomplete forecasts for {incomplete}: see the errors in the log above"

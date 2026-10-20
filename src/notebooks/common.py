@@ -26,6 +26,9 @@ COV_KEYS = ["open", "promo", "school_holiday", "public_holiday"]
 # imported from there (no build step, works on any compute and on Spark workers).
 TIMESTRAL_COMMIT = "a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff"
 
+# Many Model Forecasting (notebook 07), installed from GitHub at this commit
+MMF_COMMIT = "322ef91b7002067f9f7c7c37e5ca3e9e8abb28b4"
+
 # scenario -> (history length in days, None = everything; use the known-future covariates)
 SCENARIOS = {
     "full_cov": (None, True),
@@ -167,6 +170,20 @@ def timestral_variant(spark) -> str:
     if is_serverless(spark):
         return "timestral" if gpu else "timestral_serverless_cpu"
     return "timestral_classic_gpu" if gpu else "timestral_classic_cpu"
+
+
+def mmf_models(dbutils) -> list[str]:
+    """The MMF models of notebook 07 (`mmf_models` parameter, comma-separated)."""
+    dbutils.widgets.text("mmf_models", "Chronos2,TimesFM_2_5_200m,ChronosBoltBase")
+    return [m.strip() for m in dbutils.widgets.get("mmf_models").split(",") if m.strip()]
+
+
+def mmf_family(models: list[str]) -> str:
+    """MMF model family: local, global or foundation. One family per run: each needs its own dependencies."""
+    families = {"local" if m.startswith(("StatsForecast", "SKTime")) else
+                "global" if m.startswith(("MLForecast", "NeuralForecast")) else "foundation" for m in models}
+    assert len(families) == 1, f"run one MMF model family at a time: {models} -> {families}"
+    return families.pop()
 
 
 def get_config(dbutils, spark) -> Config:

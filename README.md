@@ -6,6 +6,13 @@ time-series foundation model, and compare it with a Prophet model fitted per sto
 Databricks: data, weights, model and forecasts in **Unity Catalog**, runs compared in **MLflow**, Timestral on
 **serverless GPU**, everything deployed with a **Declarative Automation Bundle**.
 
+> [!IMPORTANT]
+> **Check the license of the Timestral weights before running this repository.** They are released under a
+> [Modified MIT license](https://huggingface.co/mistralai/Timestral-209M/blob/main/LICENSE) that grants **no rights** to anyone whose company, or employer, has a global
+> consolidated monthly revenue above **$20 million**; this covers derivatives too. Large companies need a commercial
+> license from Mistral AI (sales@mistral.ai). The Timestral code is Apache 2.0. The other foundation models compared
+> here, [Chronos-2 and TimesFM 2.5](#timestral-and-the-many-model-forecasting-models), are Apache 2.0.
+
 **Result on 1,115 stores** (backtest, 3 forecast dates × 48 days; zero-shot Timestral vs Prophet fitted per store):
 
 | | Prophet | **Timestral** | Timestral wins on |
@@ -93,7 +100,7 @@ flowchart LR
   subgraph timestral_vs_mmf [timestral_vs_mmf: optional, classic]
     L[07 foundation models<br/>1 GPU node] --> O[06 evaluate]
     M[07 local models<br/>CPU cluster] --> O
-    N[07 global model<br/>CPU cluster] --> O
+    N[07 global model<br/>1 CPU node] --> O
   end
   D -. "@champion" .-> H
   G -. "Timestral + Prophet forecasts" .-> O
@@ -108,6 +115,7 @@ Prerequisites:
   enabled by a workspace admin on the **Previews** page). Without it, change the `serverless_gpu` environment in
   [`resources/timestral_rossmann.job.yml`](resources/timestral_rossmann.job.yml) to `environment_version: "6"` and add
   `torch` to its dependencies;
+* the right to use the Timestral weights (see the [license note](#timestral-on-databricks-zero-shot-sales-forecasting-governed-end-to-end) above);
 * `USE CATALOG` and `CREATE SCHEMA` on a catalog (the bundle creates the schema, two volumes, the tables and the model);
 * the [Databricks CLI](https://docs.databricks.com/dev-tools/cli/) locally.
 
@@ -206,7 +214,7 @@ to `sys.path`; the registered model then carries it as `code_paths`, so it works
 │                                q10, q50, q90, quantiles[21], mlflow_run_id, created_at (partitioned by model)
 ├── backtest_metrics             model, scenario, cut_date, wape_pct, wape_open_pct, mae, coverage_80, stores, win_rate
 ├── sales_with_forecasts (view)  history + the future forecasts of both models, one row per store and day
-└── optional, timestral_vs_mmf:  mmf_evaluation_<family> (MMF's backtest tables), <model>_rossmann (MMF's registered models)
+└── optional, timestral_vs_mmf:  mmf_evaluation_<family> (MMF's backtest tables), <model>_rossmann_<scenario> (MMF's models)
 ```
 
 ## Timestral vs Prophet: method
@@ -297,7 +305,9 @@ table (model `mmf_<name>`), so notebook 06 scores every model the same way.
 
 One task per model family, on the compute MMF recommends (Databricks Runtime 18 LTS ML): foundation models on one
 `g5.2xlarge` (A10G) with driver-side prediction (`serverless=True`), as Timestral runs in notebook 04; local models on
-4 × `m6id.8xlarge`, one store per Spark task; the global model on the same cluster.
+4 × `m6id.8xlarge`, one store per Spark task; the global model on one `m6id.8xlarge`. Notebook 07 checks that MMF
+returned every store, cut date and day before saving a model, and notebook 06 ranks the models on the rows they all
+have.
 
 **Results on 1,115 stores** (3 cut dates × 48 days):
 
@@ -335,9 +345,10 @@ Notes: MMF returns a point forecast (the median for the foundation models), so t
 Missing days are filled the way MMF's `resample` option does (sales 0), with `open` = 0 on those days. Forecasts are
 clipped at 0, like Prophet's.
 
-**Run it** after the main job (it reuses the tables and the Timestral and Prophet forecasts). It needs classic compute:
-one `g5.2xlarge` GPU node and a 4 × `m6id.8xlarge` cluster (AWS node types; change them on Azure or GCP), and access to
-GitHub, PyPI and the Hugging Face Hub to install MMF and download the models. About 35 minutes, cluster startup included.
+**Run it** after the main job (it reuses the tables and the Timestral and Prophet forecasts), with the same `horizon`,
+`n_cuts` and `cut_step_days`. It needs classic compute: one `g5.2xlarge` GPU node, a 4 × `m6id.8xlarge` cluster and one
+`m6id.8xlarge` node (AWS node types; change them on Azure or GCP), and access to GitHub, PyPI and the Hugging Face Hub
+to install MMF and download the models. About 35 minutes, cluster startup included.
 
 ```bash
 databricks bundle run timestral_vs_mmf -p <profile> --var catalog=<catalog>                       # all stores
@@ -425,7 +436,9 @@ Notes:
   [model cards](https://huggingface.co/collections/mistralai/timestral). The code is Apache 2.0; the weights
   ([Timestral-5M](https://huggingface.co/mistralai/Timestral-5M), [-28M](https://huggingface.co/mistralai/Timestral-28M),
   [-123M](https://huggingface.co/mistralai/Timestral-123M), [-209M](https://huggingface.co/mistralai/Timestral-209M)) are
-  released under a [Modified MIT license](https://huggingface.co/mistralai/Timestral-209M/blob/main/LICENSE). This
+  released under a [Modified MIT license](https://huggingface.co/mistralai/Timestral-209M/blob/main/LICENSE) that
+  excludes companies (and employees of companies) with a global consolidated monthly revenue above $20 million, unless
+  they get a commercial license from Mistral AI. This
   repository pins upstream commit
   [`a534bdb`](https://github.com/mistralai/timestral/commit/a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff).
 * **[Rossmann Store Sales](https://www.kaggle.com/c/rossmann-store-sales)**: the dataset, from the Kaggle competition
@@ -448,4 +461,6 @@ Notes:
 ## License
 
 The code in this repository is released under the [Apache License 2.0](LICENSE). Timestral, its weights, Prophet, MMF,
-the models it runs and the Rossmann data keep their own licenses and terms (see [Acknowledgements](#acknowledgements)).
+the models it runs and the Rossmann data keep their own licenses and terms (see [Acknowledgements](#acknowledgements));
+in particular, the Timestral weights' license excludes large companies (see the note at the top). This README is not
+legal advice.

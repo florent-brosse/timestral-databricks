@@ -9,6 +9,9 @@
 # MAGIC 3. `forecast(history, prediction_length=48)` → 21 quantiles per day.
 # MAGIC
 # MAGIC No training, no MLflow, no GPU needed (Spark only reads the store's sales): one store forecasts in seconds on CPU.
+# MAGIC
+# MAGIC **License:** the weights' [Modified MIT license](https://huggingface.co/mistralai/Timestral-209M/blob/main/LICENSE) grants no rights to companies (or their employees) with a
+# MAGIC global consolidated monthly revenue above $20 million, unless they get a commercial license from Mistral AI.
 # MAGIC Once this works,
 # MAGIC notebook 03 turns the same model into a governed Unity Catalog model for the production pipeline.
 

@@ -16,6 +16,13 @@ resources:
           default: ${var.model_id}
         - name: experiment_name
           default: ${var.experiment_name}
+        # the backtest of timestral_rossmann: keep the same values to compare the models
+        - name: horizon
+          default: "48"
+        - name: n_cuts
+          default: "3"
+        - name: cut_step_days
+          default: "28"
         - name: max_stores
           default: "0"
 
@@ -39,6 +46,18 @@ resources:
             num_workers: 4
             data_security_mode: SINGLE_USER
 
+        - job_cluster_key: cpu_single  # 32 vCPU, 128 GB
+          new_cluster:
+            spark_version: 18.x-cpu-ml-scala2.13  # 18 LTS ML
+            node_type_id: m6id.8xlarge
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.master: local[*, 4]
+              spark.databricks.cluster.profile: singleNode
+            custom_tags:
+              ResourceClass: SingleNode
+
       environments:
         - environment_key: serverless_cpu
           spec:
@@ -48,6 +67,7 @@ resources:
         # Zero-shot foundation models, like Timestral
         - task_key: mmf_foundation
           job_cluster_key: gpu
+          timeout_seconds: 5400
           notebook_task:
             notebook_path: ../src/notebooks/07_mmf_models.py
             base_parameters:
@@ -56,14 +76,16 @@ resources:
         # One model per store, refitted at every cut (Spark distributes the stores)
         - task_key: mmf_local
           job_cluster_key: cpu_cluster
+          timeout_seconds: 5400
           notebook_task:
             notebook_path: ../src/notebooks/07_mmf_models.py
             base_parameters:
               mmf_models: StatsForecastAutoArima,StatsForecastAutoETS,StatsForecastBaselineSeasonalNaive
 
-        # One model trained on all stores
+        # One model trained on all stores, on one node as MMF recommends
         - task_key: mmf_global
-          job_cluster_key: cpu_cluster
+          job_cluster_key: cpu_single
+          timeout_seconds: 5400
           notebook_task:
             notebook_path: ../src/notebooks/07_mmf_models.py
             base_parameters:
@@ -72,5 +94,6 @@ resources:
         - task_key: evaluate
           depends_on: [{task_key: mmf_foundation}, {task_key: mmf_local}, {task_key: mmf_global}]
           environment_key: serverless_cpu
+          timeout_seconds: 1800
           notebook_task:
             notebook_path: ../src/notebooks/06_evaluate.py

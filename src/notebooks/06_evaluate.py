@@ -134,23 +134,31 @@ display(spark.sql(f"""
 
 # MAGIC %md
 # MAGIC ### Many Model Forecasting models (only after the `timestral_vs_mmf` job)
-# MAGIC Every model on the same stores, cut dates and days, most accurate first. `timestral_wins` = share of stores where
-# MAGIC Timestral has a lower total error than the model.
+# MAGIC Every model on the same stores, cut dates and days (the rows all models of a scenario have), most accurate first.
+# MAGIC `timestral_wins` = share of stores where Timestral has a lower total error than the model on those rows.
 
 # COMMAND ----------
 
-vs_timestral = spark.sql(f"""
-  WITH err AS (SELECT model, scenario, store, sum(abs(q50 - sales)) AS e FROM ({scored}) GROUP BY ALL)
-  SELECT a.model, a.scenario, CAST(avg(CASE WHEN t.e < a.e THEN 1.0 ELSE 0.0 END) AS DOUBLE) AS timestral_wins
-  FROM err a JOIN err t ON t.model = 'timestral' AND t.scenario = a.scenario AND t.store = a.store
-  WHERE a.model NOT LIKE 'timestral%' GROUP BY ALL
-""").toPandas()
-leaderboard = (summary[~summary.model.str.startswith("timestral_")]
-               .merge(vs_timestral, on=["model", "scenario"], how="left")
-               [["scenario", "model", "wape_pct", "wape_open_pct", "mae", "coverage_80", "stores", "timestral_wins"]]
-               .sort_values(["scenario", "wape_pct"]))
 fig3 = None
-if leaderboard.model.str.startswith("mmf_").any():
+if summary.model.str.startswith("mmf_").any():
+    # only the rows every model of the scenario has, so that a quick run (max_stores) or a skipped window compares fairly
+    common_rows = f"""
+      WITH s AS (SELECT * FROM ({scored}) WHERE NOT startswith(model, 'timestral_')),
+      n AS (SELECT scenario, count(DISTINCT model) AS n_models FROM s GROUP BY scenario),
+      keys AS (SELECT s.scenario, cut_date, store, date FROM s JOIN n USING (scenario)
+               GROUP BY s.scenario, cut_date, store, date, n.n_models HAVING count(DISTINCT model) = n.n_models)
+      SELECT s.* FROM s JOIN keys USING (scenario, cut_date, store, date)
+    """
+    ranked = spark.sql(f"SELECT model, scenario, {metric_sql} FROM ({common_rows}) GROUP BY ALL")
+    vs_timestral = spark.sql(f"""
+      WITH err AS (SELECT model, scenario, store, sum(abs(q50 - sales)) AS e FROM ({common_rows}) GROUP BY ALL)
+      SELECT a.model, a.scenario, CAST(avg(CASE WHEN t.e < a.e THEN 1.0 ELSE 0.0 END) AS DOUBLE) AS timestral_wins
+      FROM err a JOIN err t ON t.model = 'timestral' AND t.scenario = a.scenario AND t.store = a.store
+      WHERE a.model != 'timestral' GROUP BY ALL
+    """)
+    leaderboard = (ranked.join(vs_timestral, ["model", "scenario"], "left").toPandas()
+                   [["scenario", "model", "wape_pct", "wape_open_pct", "mae", "coverage_80", "stores", "timestral_wins"]]
+                   .sort_values(["scenario", "wape_pct"]))
     display(leaderboard)
     shown = [s for s in ["full_cov", "full_nocov"] if s in set(leaderboard.scenario)]
     fig3, axes3 = plt.subplots(1, len(shown), figsize=(7 * len(shown), 5), squeeze=False)
@@ -159,7 +167,7 @@ if leaderboard.model.str.startswith("mmf_").any():
         colors = ["tab:orange" if m == "timestral" else "tab:blue" if m == "prophet" else "tab:gray" for m in d.model]
         ax.barh(d.model.str.removeprefix("mmf_"), d.wape_pct, color=colors)
         ax.bar_label(ax.containers[0], fmt="%.1f%%", fontsize=8)
-        ax.set_title(f"{scenario}: WAPE (%), lower is better")
+        ax.set_title(f"{scenario}: WAPE (%) on {int(d.stores.min())} stores, lower is better")
     plt.tight_layout()
     display(fig3)
 
@@ -237,5 +245,8 @@ display(spark.sql(f"SELECT * FROM {cfg.table('sales_with_forecasts')} WHERE stor
 
 # COMMAND ----------
 
-dbutils.notebook.exit(json.dumps({"summary": summary.drop(columns=["mlflow_run_id"]).to_dict("records"),
-                                  "runtime_s": runtimes, "comparison_run_id": run.info.run_id}))
+# valid JSON: no coverage for point-forecast models, no runtime for a model without a finished run -> null
+out = summary.drop(columns=["mlflow_run_id"])
+dbutils.notebook.exit(json.dumps({"summary": out.astype(object).where(out.notna(), None).to_dict("records"),
+                                  "runtime_s": {k: v if pd.notna(v) else None for k, v in runtimes.items()},
+                                  "comparison_run_id": run.info.run_id}))

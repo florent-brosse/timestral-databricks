@@ -27,7 +27,9 @@
 # MAGIC | `mistralai/Timestral-123M` | 490 MB |
 # MAGIC | `mistralai/Timestral-209M` | 837 MB |
 # MAGIC
-# MAGIC The weights are under a [Modified MIT license](https://huggingface.co/mistralai/Timestral-209M/blob/main/LICENSE).
+# MAGIC The weights are under a [Modified MIT license](https://huggingface.co/mistralai/Timestral-209M/blob/main/LICENSE) that
+# MAGIC grants no rights to companies (or their employees) with a global consolidated monthly revenue above $20 million,
+# MAGIC unless they get a commercial license from Mistral AI. The model description in Unity Catalog says so too.
 
 # COMMAND ----------
 
@@ -93,7 +95,9 @@ else:
     client.update_registered_model(cfg.model_name, description=(
         "Timestral (Mistral AI) time-series foundation model, zero-shot probabilistic forecasting with past-only and "
         "known-future covariates. Input: long DataFrame series_id, ds, y (NaN = forecast), covariate columns. "
-        "Code Apache 2.0 (github.com/mistralai/timestral), weights Modified MIT."))
+        "Code Apache 2.0 (github.com/mistralai/timestral). Weights: Modified MIT license, which grants no rights to "
+        "companies (or their employees) with a global consolidated monthly revenue above $20 million without a "
+        "commercial license from Mistral AI."))
     print(f"registered {cfg.model_name} version {version}, alias @champion")
 
 dbutils.notebook.exit(json.dumps({"model": cfg.model_name, "champion": version, "revision": revision}))

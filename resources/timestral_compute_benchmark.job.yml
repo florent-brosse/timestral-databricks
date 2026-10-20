@@ -16,6 +16,15 @@ resources:
           default: ${var.model_id}
         - name: experiment_name
           default: ${var.experiment_name}
+        # the backtest of timestral_rossmann: keep the same values to compare the runs
+        - name: horizon
+          default: "48"
+        - name: n_cuts
+          default: "3"
+        - name: cut_step_days
+          default: "28"
+        - name: short_history_days
+          default: "90"
         - name: max_stores
           default: "0"
 
