@@ -13,6 +13,7 @@
 # MAGIC   side by side in the experiment UI.
 # MAGIC * The view `sales_with_forecasts` puts the history and the future forecasts of both models in one place
 # MAGIC   (`timestral` = the main path on serverless GPU).
+# MAGIC * After the optional jobs: the compute variants of Timestral, and the Many Model Forecasting models (notebook 07).
 
 # COMMAND ----------
 
@@ -20,6 +21,7 @@ import json
 
 import matplotlib.pyplot as plt
 import mlflow
+import pandas as pd
 from mlflow.tracking import MlflowClient
 
 import common
@@ -36,7 +38,7 @@ metric_sql = """
   CAST(100 * sum(abs(q50 - sales)) / sum(sales) AS DOUBLE) AS wape_pct,
   CAST(100 * sum(abs(q50 - sales)) FILTER (WHERE open = 1) / sum(sales) FILTER (WHERE open = 1) AS DOUBLE) AS wape_open_pct,
   CAST(avg(abs(q50 - sales)) AS DOUBLE) AS mae,
-  CAST(avg(CASE WHEN sales BETWEEN q10 AND q90 THEN 1.0 ELSE 0.0 END) AS DOUBLE) AS coverage_80,
+  CAST(avg(CASE WHEN q10 IS NULL THEN NULL WHEN sales BETWEEN q10 AND q90 THEN 1.0 ELSE 0.0 END) AS DOUBLE) AS coverage_80,
   count(DISTINCT store) AS stores
 """
 overall = spark.sql(f"SELECT model, scenario, NULL AS cut_date, {metric_sql}, first(mlflow_run_id) AS mlflow_run_id FROM ({scored}) GROUP BY ALL")
@@ -69,7 +71,8 @@ display(summary)
 client = MlflowClient()
 for _, r in summary.iterrows():
     for k in ["wape_pct", "wape_open_pct", "mae", "coverage_80", "win_rate"]:
-        client.log_metric(r.mlflow_run_id, k, float(r[k]))
+        if pd.notna(r[k]):  # point-forecast models (MMF) have no coverage
+            client.log_metric(r.mlflow_run_id, k, float(r[k]))
     cuts = m[(m.mlflow_run_id == r.mlflow_run_id) & m.cut_date.notna()].sort_values("cut_date")
     for step, (_, c) in enumerate(cuts.iterrows()):
         client.log_metric(r.mlflow_run_id, "wape_pct_by_cut", float(c.wape_pct), step=step)
@@ -129,6 +132,39 @@ display(spark.sql(f"""
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ### Many Model Forecasting models (only after the `timestral_vs_mmf` job)
+# MAGIC Every model on the same stores, cut dates and days, most accurate first. `timestral_wins` = share of stores where
+# MAGIC Timestral has a lower total error than the model.
+
+# COMMAND ----------
+
+vs_timestral = spark.sql(f"""
+  WITH err AS (SELECT model, scenario, store, sum(abs(q50 - sales)) AS e FROM ({scored}) GROUP BY ALL)
+  SELECT a.model, a.scenario, CAST(avg(CASE WHEN t.e < a.e THEN 1.0 ELSE 0.0 END) AS DOUBLE) AS timestral_wins
+  FROM err a JOIN err t ON t.model = 'timestral' AND t.scenario = a.scenario AND t.store = a.store
+  WHERE a.model NOT LIKE 'timestral%' GROUP BY ALL
+""").toPandas()
+leaderboard = (summary[~summary.model.str.startswith("timestral_")]
+               .merge(vs_timestral, on=["model", "scenario"], how="left")
+               [["scenario", "model", "wape_pct", "wape_open_pct", "mae", "coverage_80", "stores", "timestral_wins"]]
+               .sort_values(["scenario", "wape_pct"]))
+fig3 = None
+if leaderboard.model.str.startswith("mmf_").any():
+    display(leaderboard)
+    shown = [s for s in ["full_cov", "full_nocov"] if s in set(leaderboard.scenario)]
+    fig3, axes3 = plt.subplots(1, len(shown), figsize=(7 * len(shown), 5), squeeze=False)
+    for ax, scenario in zip(axes3[0], shown):
+        d = leaderboard[leaderboard.scenario == scenario].sort_values("wape_pct", ascending=False)
+        colors = ["tab:orange" if m == "timestral" else "tab:blue" if m == "prophet" else "tab:gray" for m in d.model]
+        ax.barh(d.model.str.removeprefix("mmf_"), d.wape_pct, color=colors)
+        ax.bar_label(ax.containers[0], fmt="%.1f%%", fontsize=8)
+        ax.set_title(f"{scenario}: WAPE (%), lower is better")
+    plt.tight_layout()
+    display(fig3)
+
+# COMMAND ----------
+
 example = spark.sql(f"""
   SELECT model, store, date, q10, q50, q90 FROM {FORECASTS}
   WHERE forecast_type = 'future' AND store IN (1, 470, 262, 1000)
@@ -162,6 +198,8 @@ with mlflow.start_run(run_name="comparison") as run:
     mlflow.log_table(summary, "backtest_summary.json")
     mlflow.log_figure(fig, "wape_by_scenario.png")
     mlflow.log_figure(fig2, "future_forecast_examples.png")
+    if fig3 is not None:
+        mlflow.log_figure(fig3, "wape_all_models.png")
 
 # COMMAND ----------
 

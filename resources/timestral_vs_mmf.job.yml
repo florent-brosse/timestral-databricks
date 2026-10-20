@@ -1,0 +1,76 @@
+resources:
+  jobs:
+    timestral_vs_mmf:
+      name: timestral_vs_mmf
+      description: >
+        Optional. Models of the Many Model Forecasting (MMF) solution accelerator (foundation, local and global) on the
+        same backtest as Timestral and Prophet, then the comparison. Run timestral_rossmann first.
+        Node types are AWS; change them for Azure or GCP.
+
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: schema
+          default: ${resources.schemas.timestral.name}
+        - name: model_id
+          default: ${var.model_id}
+        - name: experiment_name
+          default: ${var.experiment_name}
+        - name: max_stores
+          default: "0"
+
+      job_clusters:
+        - job_cluster_key: gpu  # 1x NVIDIA A10G 24 GB, 8 vCPU
+          new_cluster:
+            spark_version: 18.x-gpu-ml-scala2.13  # 18 LTS ML (GPU)
+            node_type_id: g5.2xlarge
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.master: local[*, 4]
+              spark.databricks.cluster.profile: singleNode
+            custom_tags:
+              ResourceClass: SingleNode
+
+        - job_cluster_key: cpu_cluster  # 4 workers x 32 vCPU = 128 vCPU
+          new_cluster:
+            spark_version: 18.x-cpu-ml-scala2.13  # 18 LTS ML
+            node_type_id: m6id.8xlarge
+            num_workers: 4
+            data_security_mode: SINGLE_USER
+
+      environments:
+        - environment_key: serverless_cpu
+          spec:
+            environment_version: "6"
+
+      tasks:
+        # Zero-shot foundation models, like Timestral
+        - task_key: mmf_foundation
+          job_cluster_key: gpu
+          notebook_task:
+            notebook_path: ../src/notebooks/07_mmf_models.py
+            base_parameters:
+              mmf_models: Chronos2,TimesFM_2_5_200m,ChronosBoltBase
+
+        # One model per store, refitted at every cut (Spark distributes the stores)
+        - task_key: mmf_local
+          job_cluster_key: cpu_cluster
+          notebook_task:
+            notebook_path: ../src/notebooks/07_mmf_models.py
+            base_parameters:
+              mmf_models: StatsForecastAutoArima,StatsForecastAutoETS,StatsForecastBaselineSeasonalNaive
+
+        # One model trained on all stores
+        - task_key: mmf_global
+          job_cluster_key: cpu_cluster
+          notebook_task:
+            notebook_path: ../src/notebooks/07_mmf_models.py
+            base_parameters:
+              mmf_models: MLForecastLGBM
+
+        - task_key: evaluate
+          depends_on: [{task_key: mmf_foundation}, {task_key: mmf_local}, {task_key: mmf_global}]
+          environment_key: serverless_cpu
+          notebook_task:
+            notebook_path: ../src/notebooks/06_evaluate.py

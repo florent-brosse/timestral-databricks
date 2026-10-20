@@ -1,9 +1,10 @@
 # Timestral on Databricks: zero-shot sales forecasting, governed end to end
 
 Forecast the daily sales of **1,115 Rossmann stores** with [Timestral](https://github.com/mistralai/timestral), Mistral AI's
-time-series foundation model, and compare it with a Prophet model fitted per store. On Databricks: data, weights,
-model and forecasts in **Unity Catalog**, runs compared in **MLflow**, Timestral on **serverless GPU**, everything deployed
-with a **Declarative Automation Bundle**.
+time-series foundation model, and compare it with a Prophet model fitted per store and with the models of Databricks'
+[Many Model Forecasting](https://github.com/databricks-industry-solutions/many-model-forecasting) accelerator. On
+Databricks: data, weights, model and forecasts in **Unity Catalog**, runs compared in **MLflow**, Timestral on
+**serverless GPU**, everything deployed with a **Declarative Automation Bundle**.
 
 **Result on 1,115 stores** (backtest, 3 forecast dates × 48 days; zero-shot Timestral vs Prophet fitted per store):
 
@@ -18,6 +19,11 @@ with a **Declarative Automation Bundle**.
 The whole pipeline (data, model registration, both models on every store, evaluation) runs in about 10 minutes on
 serverless; Timestral forecasts all stores in 3.5 minutes on one serverless A10 GPU. Read the [caveats](#caveats).
 
+**Against the Many Model Forecasting (MMF) models** on the same backtest (optional job): the two foundation models lead.
+With covariates, Timestral (9.3% WAPE) is ahead of Chronos-2 (9.9%), TimesFM 2.5 (10.6%), Prophet, AutoARIMA and
+LightGBM; without covariates, Chronos-2 is slightly ahead (15.2% vs 15.5%).
+[Details](#timestral-and-the-many-model-forecasting-models).
+
 ---
 
 ## Contents
@@ -29,11 +35,12 @@ serverless; Timestral forecasts all stores in 3.5 minutes on one serverless A10 
 5. [From files to a governed model](#from-files-to-a-governed-model)
 6. [Timestral vs Prophet: method](#timestral-vs-prophet-method)
 7. [Results](#results)
-8. [Compute options](#compute-options)
-9. [Caveats](#caveats)
-10. [Repository layout](#repository-layout)
-11. [Acknowledgements](#acknowledgements)
-12. [License](#license)
+8. [Timestral and the Many Model Forecasting models](#timestral-and-the-many-model-forecasting-models)
+9. [Compute options](#compute-options)
+10. [Caveats](#caveats)
+11. [Repository layout](#repository-layout)
+12. [Acknowledgements](#acknowledgements)
+13. [License](#license)
 
 ---
 
@@ -46,6 +53,8 @@ serverless; Timestral forecasts all stores in 3.5 minutes on one serverless A10 
 3. **Databricks makes it production-grade.** Data, weights, the registered model (`@champion`) and the forecasts live in
    Unity Catalog; every forecast row points to its model version and MLflow run; Timestral runs on serverless GPU with
    no cluster to manage; the forecasts sit next to the data, ready for a dashboard or Genie.
+4. **Checked against the alternatives.** On the same backtest, the models of Databricks' Many Model Forecasting
+   accelerator confirm the trend: the foundation models lead, Timestral first with covariates, Chronos-2 close behind.
 
 ## Learning path: the notebooks
 
@@ -61,8 +70,9 @@ Start simple, then productionize:
 | 05 | [`prophet_baseline`](src/notebooks/05_prophet_baseline.py): the same forecasts with Prophet, one model per store, Spark `applyInPandas` | baseline | |
 | 06 | [`evaluate`](src/notebooks/06_evaluate.py): metrics, MLflow, the `sales_with_forecasts` view | | |
 | 04b | [`forecast_cpu_cluster`](src/notebooks/04b_forecast_cpu_cluster.py): Timestral spread over a CPU cluster (benchmark job) | optional | `@champion` |
+| 07 | [`mmf_models`](src/notebooks/07_mmf_models.py): the Many Model Forecasting models on the same backtest (`timestral_vs_mmf` job) | optional | |
 
-Two jobs:
+Three jobs:
 
 ```mermaid
 flowchart LR
@@ -80,7 +90,13 @@ flowchart LR
     I[04 on 1 CPU node] --> K
     J[04b on a 128-vCPU cluster] --> K
   end
+  subgraph timestral_vs_mmf [timestral_vs_mmf: optional, classic]
+    L[07 foundation models<br/>1 GPU node] --> O[06 evaluate]
+    M[07 local models<br/>CPU cluster] --> O
+    N[07 global model<br/>CPU cluster] --> O
+  end
   D -. "@champion" .-> H
+  G -. "Timestral + Prophet forecasts" .-> O
 ```
 
 ## Quickstart
@@ -189,7 +205,8 @@ to `sys.path`; the registered model then carries it as `code_paths`, so it works
 ├── forecasts                    model, model_version, scenario, forecast_type, cut_date, store, date, horizon_day,
 │                                q10, q50, q90, quantiles[21], mlflow_run_id, created_at (partitioned by model)
 ├── backtest_metrics             model, scenario, cut_date, wape_pct, wape_open_pct, mae, coverage_80, stores, win_rate
-└── sales_with_forecasts (view)  history + the future forecasts of both models, one row per store and day
+├── sales_with_forecasts (view)  history + the future forecasts of both models, one row per store and day
+└── optional, timestral_vs_mmf:  mmf_evaluation_<family> (MMF's backtest tables), <model>_rossmann (MMF's registered models)
 ```
 
 ## Timestral vs Prophet: method
@@ -263,6 +280,70 @@ What it says:
 
 ![Future forecasts of four stores](docs/images/future_forecast_examples.png)
 
+## Timestral and the Many Model Forecasting models
+
+[Many Model Forecasting](https://github.com/databricks-industry-solutions/many-model-forecasting) (MMF) is the
+Databricks solution accelerator for forecasting at scale: local, global and foundation models behind one
+`run_forecast` call, with backtesting, MLflow tracking and Unity Catalog registration built in. The optional
+`timestral_vs_mmf` job runs a selection of MMF models with notebook 07 and writes their forecasts to the `forecasts`
+table (model `mmf_<name>`), so notebook 06 scores every model the same way.
+
+| | notebooks 04-05 | MMF `run_forecast` |
+|---|---|---|
+| cut dates | 2015-04-19, 2015-05-17, 2015-06-14 | `backtest_length=104`, `stride=28`: the same 3 windows |
+| horizon | 48 days | `prediction_length=48` |
+| covariates | the 4 calendar columns | the same, as `dynamic_future_numerical`, for the models that take them |
+| settings | defaults | MMF defaults ([`models_conf.yaml`](https://github.com/databricks-industry-solutions/many-model-forecasting/blob/main/mmf_sa/models/models_conf.yaml)), commit [`322ef91`](https://github.com/databricks-industry-solutions/many-model-forecasting/commit/322ef91b7002067f9f7c7c37e5ca3e9e8abb28b4) |
+
+One task per model family, on the compute MMF recommends (Databricks Runtime 18 LTS ML): foundation models on one
+`g5.2xlarge` (A10G) with driver-side prediction (`serverless=True`), as Timestral runs in notebook 04; local models on
+4 × `m6id.8xlarge`, one store per Spark task; the global model on the same cluster.
+
+**Results on 1,115 stores** (3 cut dates × 48 days):
+
+| model | type | `full_cov` WAPE | open days | `full_nocov` WAPE | open days | Timestral wins on (`full_cov` / `full_nocov`) |
+|---|---|---|---|---|---|---|
+| **Timestral-209M** | foundation, zero-shot | **9.3%** | **9.1%** | 15.5% | 11.2% | |
+| Chronos-2 (MMF) | foundation, zero-shot | 9.9% | 9.2% | **15.2%** | **11.1%** | 77% / 46% |
+| TimesFM 2.5 200M (MMF) | foundation, zero-shot | 10.6% | 9.9% | 19.8% | 15.3% | 89% / 99.6% |
+| Chronos-Bolt Base (MMF) | foundation, zero-shot | | | 20.0% | 15.5% | – / 99.5% |
+| Prophet (notebook 05) | one model per store | 11.5% | 10.5% | 22.1% | 17.4% | 97% / 99.8% |
+| AutoARIMA (MMF) | one model per store | 13.0%¹ | 12.4%¹ | 22.3% | 18.0% | 98.5% / 99.8% |
+| AutoETS (MMF) | one model per store | | | 22.1% | 17.5% | – / 99.9% |
+| LightGBM (MMF `MLForecastLGBM`) | one model for all stores | 15.5% | 15.2% | 20.1% | 16.9% | 99.2% / 91% |
+| Seasonal naive (MMF) | baseline | | | 27.6% | 23.5% | – / 100% |
+
+![WAPE of every model](docs/images/wape_all_models.png)
+
+Empty `full_cov` cells: the model has no covariate support in MMF. ¹ On 1,113 stores: AutoARIMA with covariates
+diverges on 2 stores (store 1014: a 3.7 M€ forecast for one day), which puts it at 28.2% on all 1,115 (chart above). On
+the same 1,113 stores, Timestral and Prophet do not change (9.3%, 11.5%).
+
+What it says:
+
+* **Foundation models lead, with no training.** Timestral, Chronos-2 and TimesFM 2.5 with covariates are ahead of every
+  model fitted on the data.
+* **Timestral and Chronos-2 are close.** With the calendar, Timestral is ahead (9.3% vs 9.9%, more accurate on 77% of
+  the stores); on sales history alone, Chronos-2 is slightly ahead (15.2% vs 15.5%).
+* **Covariates help every model that takes them**: Chronos-2 15.2% → 9.9%, TimesFM 19.8% → 10.6%, LightGBM
+  20.1% → 15.5%, AutoARIMA 22.3% → 13.0% (1,113 stores).
+* **The fitted models run with MMF's defaults.** MMF trains global models once, on the data before the first cut, and
+  reuses them for the 3 windows; LightGBM uses MMF's default lag features. MMF is configuration-driven, so each model
+  can be tuned in its config.
+
+Notes: MMF returns a point forecast (the median for the foundation models), so these models have no coverage.
+Missing days are filled the way MMF's `resample` option does (sales 0), with `open` = 0 on those days. Forecasts are
+clipped at 0, like Prophet's.
+
+**Run it** after the main job (it reuses the tables and the Timestral and Prophet forecasts). It needs classic compute:
+one `g5.2xlarge` GPU node and a 4 × `m6id.8xlarge` cluster (AWS node types; change them on Azure or GCP), and access to
+GitHub, PyPI and the Hugging Face Hub to install MMF and download the models. About 35 minutes, cluster startup included.
+
+```bash
+databricks bundle run timestral_vs_mmf -p <profile> --var catalog=<catalog>                       # all stores
+databricks bundle run timestral_vs_mmf -p <profile> --var catalog=<catalog> --params max_stores=20  # quick run
+```
+
 ## Compute options
 
 The forecasts do not depend on the compute: the same model version gives the same numbers on GPU and CPU. The
@@ -313,8 +394,10 @@ Notes:
 * **Possible overlap with Timestral's training data.** Rossmann is part of [fev-bench](https://github.com/autogluon/fev),
   one of the benchmarks Timestral is evaluated on, and Mistral has not yet published the list of real datasets used in
   pretraining (most of it is synthetic; a technical report is announced). Read the results as "likely zero-shot".
-* **Prophet runs with default settings** plus the regressors. Tuning (changepoints, holidays, seasonality priors) would
-  narrow the gap: the comparison is zero-shot vs default, not vs a tuned model.
+* **Possible overlap applies to every foundation model.** Chronos-2 and TimesFM may also have seen Rossmann during
+  pretraining.
+* **Prophet and the MMF models run with default settings** plus the covariates. Tuning (changepoints, holidays,
+  seasonality priors, features) would narrow the gap: the comparison is zero-shot vs default, not vs tuned models.
 * **`open` is almost the answer on closed days.** `open = 0` means `sales = 0`. It is legitimate known-future information
   (the store schedule), which is why the open-days WAPE is reported too.
 * **One dataset, three cut dates.** A strong case study, not a general benchmark.
@@ -327,9 +410,10 @@ Notes:
 │   ├── timestral.schema.yml                UC schema
 │   ├── raw.volume.yml, models.volume.yml   UC volumes
 │   ├── timestral_rossmann.job.yml          main job, serverless (CPU + one GPU task)
-│   └── timestral_compute_benchmark.job.yml optional job, classic GPU / CPU / CPU cluster
+│   ├── timestral_compute_benchmark.job.yml optional job, classic GPU / CPU / CPU cluster
+│   └── timestral_vs_mmf.job.yml            optional job, Many Model Forecasting models on the same backtest
 └── src/notebooks/
-    ├── 00_ … 06_ notebooks
+    ├── 00_ … 07_ notebooks
     ├── common.py                           config, Timestral loading, forecasting functions, MLflow + save
     └── timestral_model.py                  the MLflow pyfunc registered in Unity Catalog
 ```
@@ -352,11 +436,16 @@ Notes:
   ([`autogluon/fev_datasets`](https://huggingface.co/datasets/autogluon/fev_datasets)).
 * **[Prophet](https://facebook.github.io/prophet/)** ([GitHub](https://github.com/facebook/prophet)) by Meta's Core Data
   Science team: the baseline.
+* **[Many Model Forecasting](https://github.com/databricks-industry-solutions/many-model-forecasting)** by Databricks
+  Industry Solutions, and the models it runs here: [Chronos-2 and Chronos-Bolt](https://github.com/amazon-science/chronos-forecasting)
+  (Amazon), [TimesFM 2.5](https://github.com/google-research/timesfm) (Google Research),
+  [statsforecast](https://github.com/Nixtla/statsforecast) and [mlforecast](https://github.com/Nixtla/mlforecast)
+  (Nixtla), [LightGBM](https://github.com/microsoft/LightGBM) (Microsoft).
 * **[paschembri/timestral](https://github.com/paschembri/timestral/tree/mps-support)**: Apple MPS support for local runs.
 * Built on [Databricks](https://www.databricks.com/) Unity Catalog, serverless compute and AI Runtime, MLflow and
   [Declarative Automation Bundles](https://docs.databricks.com/dev-tools/bundles/).
 
 ## License
 
-The code in this repository is released under the [Apache License 2.0](LICENSE). Timestral, its weights, Prophet and the
-Rossmann data keep their own licenses and terms (see [Acknowledgements](#acknowledgements)).
+The code in this repository is released under the [Apache License 2.0](LICENSE). Timestral, its weights, Prophet, MMF,
+the models it runs and the Rossmann data keep their own licenses and terms (see [Acknowledgements](#acknowledgements)).
