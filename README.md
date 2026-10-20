@@ -1,5 +1,7 @@
 # Timestral on Databricks: zero-shot sales forecasting, governed end to end
 
+> **Personal project**, not affiliated with or endorsed by Databricks or Mistral AI.
+
 Forecast the daily sales of **1,115 Rossmann stores** with [Timestral](https://github.com/mistralai/timestral), Mistral AI's
 time-series foundation model, and compare it with a Prophet model fitted per store and with the models of Databricks'
 [Many Model Forecasting](https://github.com/databricks-industry-solutions/many-model-forecasting) accelerator. On
